@@ -5,25 +5,23 @@ import { saveAs } from "file-saver";
 
 // ========================= CONFIG =========================
 // Uses Vite proxy paths you set up.
+// Detect if running on GitHub Pages
 const IS_GH_PAGES = /\.github\.io$/.test(window.location.hostname);
 
+// In GitHub Pages → use Cloudflare Worker proxy
+// In local dev → use empty strings so Vite proxy kicks in
 const API_BASE = IS_GH_PAGES
-  ? {
-      wavuser: 'https://dawavinternaluser-btgsaphegvahbug9.eastus-01.azurewebsites.net',
-      patient: 'https://dawavorderpatient-hqe2apddbje9gte0.eastus-01.azurewebsites.net',
-      admin:   'https://dawavadmin-djb0f9atf8e6cwgx.eastus-01.azurewebsites.net',
-    }
-  : { wavuser: '', patient: '', admin: '' }; // local dev uses Vite proxy
+  ? 'https://wav-proxy.sujay-d99.workers.dev'
+  : '';
 
 export const API = {
   userByEmail: (email) =>
-    `${API_BASE.wavuser}/api/WAVInternalUser/byEmail/${encodeURIComponent(email)}`,
-  createPatient: `${API_BASE.patient}/api/Patient/create`,
-  createOrder:   `${API_BASE.patient}/api/Order`,
+    `${API_BASE}/wavuser/api/WAVInternalUser/byEmail/${encodeURIComponent(email)}`,
+  createPatient: `${API_BASE}/patient/api/Patient/create`,
+  createOrder:   `${API_BASE}/patient/api/Order`,
   uploadOrderPdf: (orderId) =>
-    `${API_BASE.admin}/api/OrderPdfUpload/upload/${orderId}`,
+    `${API_BASE}/admin/api/OrderPdfUpload/upload/${orderId}`,
 };
-
 
 // If your sheet uses different header names, map them here (left = code expects, right = column in Excel)
 const COLUMN_MAP = {
