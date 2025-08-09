@@ -123,7 +123,23 @@ function buildPatientPayload(row, createdById) {
   const dobStr = formatMMDDYYYY(dobJs);
   const age = calcAge(dobJs);
   const { patientAddress, patientCity, state, zip } = parseAddress(row[COLUMN_MAP.address]);
+// Safely parse a response body as JSON, but keep the original text too
+async function parseJSONSafe(res) {
+  const text = await res.text().catch(() => "");
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  return { data, text };
+}
 
+// Pretty-print model validation errors (400) into one line
+function formatModelErrors(errObj) {
+  if (!errObj || typeof errObj !== "object") return "";
+  const parts = [];
+  for (const [field, arr] of Object.entries(errObj)) {
+    if (Array.isArray(arr)) parts.push(`${field}: ${arr.join("; ")}`);
+  }
+  return parts.join(" | ");
+}
   return {
     filterStatus: "string",
     patientEHRRecId: "string",
@@ -335,58 +351,105 @@ export default function App() {
     };
     reader.readAsArrayBuffer(f);
   }
+async function getJSONAndText(res) {
+  let text = "";
+  try { text = await res.text(); } catch {}
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  return { json, text };
+}
+
+function formatValidationErrors(errors) {
+  if (!errors || typeof errors !== "object") return "";
+  return Object.entries(errors)
+    .map(([field, msgs]) => `${field}: ${msgs.join("; ")}`)
+    .join(" | ");
+}
 
   async function createPatientIfNeeded(row, rowIndex) {
-    const existing = row[COLUMN_MAP.patientid];
-    if (existing) {
-      addLog(`Row ${rowIndex + 1}: patientid exists (${existing}). Skipping create.`);
-      return existing;
-    }
-    const payload = buildPatientPayload(row, userId);
-    const res = await fetch(API.createPatient, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", accept: "*/*" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(`Patient create failed: ${res.status}`);
-    const data = await res.json();
-    const newId = data?.id || data?.agencyInfo?.patientWAVId || ""; // prefer top-level id
-    if (!newId) throw new Error("No patient id in create response");
-    row[COLUMN_MAP.patientid] = newId; // mutate the in-memory row for later write-back
-    addLog(`Row ${rowIndex + 1}: ✅ Patient created id=${newId}`);
-
-    // NEW: update totals & summary list
-    setPatientsCreated((c) => c + 1);
-    setPatientSuccessList((list) => [
-      ...list,
-      { row: rowIndex + 1, patientName: String(row[COLUMN_MAP.patientName] || "") }
-    ]);
-
-    return newId;
+  const existing = row[COLUMN_MAP.patientid];
+  if (existing) {
+    addLog(`Row ${rowIndex + 1}: Patient already exists (${existing}), skipping.`);
+    return existing;
   }
 
-  async function createOrder(row, rowIndex, patientId) {
-    const payload = buildOrderPayload(row, patientId, userId);
-    const res = await fetch(API.createOrder, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", accept: "*/*" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(`Order create failed: ${res.status}`);
-    const data = await res.json();
-    row["OrderResponse"] = asJsonCell(data);
-    const orderId = data?.id || data?.orderId || "";
-    addLog(`Row ${rowIndex + 1}: 🧾 Order created id=${orderId || "(unknown)"}`);
+  const payload = buildPatientPayload(row, userId);
+  const res = await fetch(API.createPatient, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", accept: "*/*" },
+    body: JSON.stringify(payload),
+  });
 
-    // NEW: update totals & summary list
-    setOrdersCreated((c) => c + 1);
-    setOrderSuccessList((list) => [
-      ...list,
-      { row: rowIndex + 1, documentId: String(row[COLUMN_MAP.documentId] || "") }
-    ]);
+  const { json, text } = await getJSONAndText(res);
 
-    return { data, orderId };
+  // Save for Excel output
+  row["PatientResponse"] = asJsonCell(json || text || { status: res.status });
+
+  if (res.status === 409) {
+    const id = json?.id || json?.patientId || json?.agencyInfo?.patientWAVId || "";
+    addLog(`Row ${rowIndex + 1}: ⚠️ Duplicate patient found${id ? ` (ID: ${id})` : ""}`);
+    if (id) row[COLUMN_MAP.patientid] = id;
+    return id;
   }
+
+  if (res.status === 400) {
+    const msg = json?.title || json?.message || "Invalid data";
+    const errs = formatValidationErrors(json?.errors);
+    addLog(`Row ${rowIndex + 1}: ❌ Patient could not be created — ${msg}${errs ? " | " + errs : ""}`);
+    throw new Error(msg);
+  }
+
+  if (!res.ok) {
+    addLog(`Row ${rowIndex + 1}: ❌ Patient create failed (${res.status})`);
+    throw new Error(`Patient create failed: ${res.status}`);
+  }
+
+  // Success
+  const newId = json?.id || json?.agencyInfo?.patientWAVId || "";
+  if (!newId) throw new Error("No patient ID returned");
+  row[COLUMN_MAP.patientid] = newId;
+  addLog(`Row ${rowIndex + 1}: ✅ Patient created (ID: ${newId})`);
+  setPatientsCreated(c => c + 1);
+  setPatientSuccessList(list => [...list, { row: rowIndex + 1, patientName: row[COLUMN_MAP.patientName] }]);
+  return newId;
+}
+async function createOrder(row, rowIndex, patientId) {
+  const payload = buildOrderPayload(row, patientId, userId);
+  const res = await fetch(API.createOrder, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", accept: "*/*" },
+    body: JSON.stringify(payload),
+  });
+
+  const { json, text } = await getJSONAndText(res);
+  row["OrderResponse"] = asJsonCell(json || text || { status: res.status });
+
+  if (res.status === 409) {
+    const orderId = json?.orderId || "";
+    addLog(`Row ${rowIndex + 1}: ⚠️ Duplicate order found${orderId ? ` (${orderId})` : ""}`);
+    return { data: json, orderId, success: false }; // mark as not success to skip PDF
+  }
+
+  if (res.status === 400) {
+    const msg = json?.title || json?.message || "Invalid data";
+    const errs = formatValidationErrors(json?.errors);
+    addLog(`Row ${rowIndex + 1}: ❌ Order could not be created — ${msg}${errs ? " | " + errs : ""}`);
+    return { data: json, orderId: null, success: false };
+  }
+
+  if (!res.ok) {
+    addLog(`Row ${rowIndex + 1}: ❌ Order create failed (${res.status})`);
+    return { data: json, orderId: null, success: false };
+  }
+
+  const orderId = json?.id || json?.orderId || "";
+  addLog(`Row ${rowIndex + 1}: 🧾 Order created (ID: ${orderId})`);
+  setOrdersCreated(c => c + 1);
+  setOrderSuccessList(list => [...list, { row: rowIndex + 1, documentId: row[COLUMN_MAP.documentId] }]);
+  return { data: json, orderId, success: true };
+}
+
+
 
   async function uploadOrderPdfIfAny(row, rowIndex, orderId) {
     const link = row[COLUMN_MAP.pdfLink];
@@ -431,15 +494,24 @@ export default function App() {
       const newRows = rows.map((r) => ({ ...r }));
 
       for (let i = 0; i < newRows.length; i++) {
-        const row = newRows[i];
-        try {
-          const patientId = await createPatientIfNeeded(row, i);
-          const { orderId } = await createOrder(row, i, patientId);
-          await uploadOrderPdfIfAny(row, i, orderId);
-        } catch (rowErr) {
-          addLog(`Row ${i + 1}: ❌ ${rowErr.message}`);
-        }
+  const row = newRows[i];
+  try {
+    const patientId = await createPatientIfNeeded(row, i);
+    const { orderId, success } = await createOrder(row, i, patientId);
+
+    // Only try PDF upload if order creation succeeded
+    if (success && orderId) {
+      try {
+        await uploadOrderPdfIfAny(row, i, orderId);
+      } catch (err) {
+        addLog(`Row ${i + 1}: ❌ PDF upload failed: ${err.message}`);
       }
+    }
+  } catch (rowErr) {
+    addLog(`Row ${i + 1}: ❌ ${rowErr.message}`);
+  }
+}
+
 
       const ws = XLSX.utils.json_to_sheet(newRows);
       const wb = XLSX.utils.book_new();
