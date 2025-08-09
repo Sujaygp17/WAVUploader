@@ -25,14 +25,27 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install
-        run: npm ci
-        # If you don't have a lockfile yet, use:
-        # run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Build
         run: npm run build
+
+      - name: List dist
+        run: ls -lah dist && find dist -maxdepth 2 -type f | sed 's/^/dist: /'
+
+      - name: Create SPA fallback (404.html)
+        run: cp dist/index.html dist/404.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
