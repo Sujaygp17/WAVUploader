@@ -1,11 +1,10 @@
+# .github/workflows/deploy.yml
 name: Deploy to GitHub Pages
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Repo-level permissions for Pages
 permissions:
   contents: read
   pages: write
@@ -19,38 +18,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-
-      # If there is no lockfile, npm ci fails; fall back to npm install
       - name: Install
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
       - name: Build
         run: npm run build
-
-      # (Optional) See what's inside dist for debugging
-      - name: List dist
-        run: |
-          ls -lah dist
-          find dist -maxdepth 2 -type f | sed 's/^/dist: /'
-
-      # SPA fallback so refresh works later if you add routing
       - name: Create SPA fallback (404.html)
         run: cp dist/index.html dist/404.html
-
-      # Upload the built site
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

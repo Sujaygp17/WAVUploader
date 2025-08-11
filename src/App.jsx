@@ -413,6 +413,11 @@ function formatValidationErrors(errors) {
   setPatientSuccessList(list => [...list, { row: rowIndex + 1, patientName: row[COLUMN_MAP.patientName] }]);
   return newId;
 }
+// simple result wrapper for order creation
+function orderCreateResult({ ok, orderId, json }) {
+  return { ok, orderId: orderId || "", json: json || null };
+}
+
 async function createOrder(row, rowIndex, patientId) {
   const payload = buildOrderPayload(row, patientId, userId);
   const res = await fetch(API.createOrder, {
@@ -424,30 +429,39 @@ async function createOrder(row, rowIndex, patientId) {
   const { json, text } = await getJSONAndText(res);
   row["OrderResponse"] = asJsonCell(json || text || { status: res.status });
 
+  // 409 Duplicate → treat as NOT created; do not log a scary line for users
   if (res.status === 409) {
-    const orderId = json?.orderId || "";
-    addLog(`Row ${rowIndex + 1}: ⚠️ Duplicate order found${orderId ? ` (${orderId})` : ""}`);
-    return { data: json, orderId, success: false }; // mark as not success to skip PDF
+    // Example: {"message":"Duplicate order found","orderId":"ORD41807"}
+    // We won’t addLog here per your request (keeps Activity clean).
+    return orderCreateResult({ ok: false, orderId: json?.orderId, json });
   }
 
+  // 400 Validation → friendly message + stop this row
   if (res.status === 400) {
     const msg = json?.title || json?.message || "Invalid data";
     const errs = formatValidationErrors(json?.errors);
     addLog(`Row ${rowIndex + 1}: ❌ Order could not be created — ${msg}${errs ? " | " + errs : ""}`);
-    return { data: json, orderId: null, success: false };
+    return orderCreateResult({ ok: false, orderId: "", json });
   }
 
+  // Other non-2xx
   if (!res.ok) {
     addLog(`Row ${rowIndex + 1}: ❌ Order create failed (${res.status})`);
-    return { data: json, orderId: null, success: false };
+    return orderCreateResult({ ok: false, orderId: "", json });
   }
 
+  // Success
   const orderId = json?.id || json?.orderId || "";
   addLog(`Row ${rowIndex + 1}: 🧾 Order created (ID: ${orderId})`);
-  setOrdersCreated(c => c + 1);
-  setOrderSuccessList(list => [...list, { row: rowIndex + 1, documentId: row[COLUMN_MAP.documentId] }]);
-  return { data: json, orderId, success: true };
+  setOrdersCreated((c) => c + 1);
+  setOrderSuccessList((list) => [
+    ...list,
+    { row: rowIndex + 1, documentId: String(row[COLUMN_MAP.documentId] || "") }
+  ]);
+
+  return orderCreateResult({ ok: true, orderId, json });
 }
+
 
 
 
@@ -493,24 +507,24 @@ async function createOrder(row, rowIndex, patientId) {
     try {
       const newRows = rows.map((r) => ({ ...r }));
 
-      for (let i = 0; i < newRows.length; i++) {
+for (let i = 0; i < newRows.length; i++) {
   const row = newRows[i];
   try {
     const patientId = await createPatientIfNeeded(row, i);
-    const { orderId, success } = await createOrder(row, i, patientId);
+    const result = await createOrder(row, i, patientId);
 
-    // Only try PDF upload if order creation succeeded
-    if (success && orderId) {
-      try {
-        await uploadOrderPdfIfAny(row, i, orderId);
-      } catch (err) {
-        addLog(`Row ${i + 1}: ❌ PDF upload failed: ${err.message}`);
-      }
+    // Upload PDF ONLY if the order was truly created (ok === true),
+    // and only if there’s a link and an orderId.
+    if (result.ok && result.orderId) {
+      await uploadOrderPdfIfAny(row, i, result.orderId);
+    } else {
+      // no PDF attempt; silently skip to avoid: "❌ PDF upload failed: 400"
     }
   } catch (rowErr) {
     addLog(`Row ${i + 1}: ❌ ${rowErr.message}`);
   }
 }
+
 
 
       const ws = XLSX.utils.json_to_sheet(newRows);
